@@ -1,6 +1,7 @@
 import type { Request, RequestHandler } from "express";
 import type { IncomingHttpHeaders } from "node:http";
 import { betterAuth, type Auth } from "better-auth";
+import { APIError, createAuthMiddleware } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { toNodeHandler } from "better-auth/node";
 import type { Db } from "@paperclipai/db";
@@ -12,6 +13,10 @@ import {
 } from "@paperclipai/db";
 import type { Config } from "../config.js";
 import { resolvePaperclipInstanceId } from "../home-paths.js";
+import {
+  claimInviteForSignup,
+  readInviteSignupToken,
+} from "./invite-signup.js";
 import {
   workspaceLoginHandoffPlugin,
   type WorkspaceHandoffExpectedIdentity,
@@ -273,7 +278,29 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
     emailAndPassword: {
       enabled: true,
       requireEmailVerification: false,
-      disableSignUp: config.authDisableSignUp,
+      // Public sign-up is enforced below, not by Better Auth's global switch,
+      // so a valid invite token can still complete an admin-issued invite.
+      disableSignUp: false,
+    },
+    hooks: {
+      before: [
+        {
+          matcher: (context) => context.path === "/sign-up/email",
+          handler: createAuthMiddleware(async (ctx) => {
+            if (!config.authDisableSignUp) return;
+            const decision = await claimInviteForSignup(db, {
+              token: readInviteSignupToken({ headers: ctx.headers, body: ctx.body }),
+              email: (ctx.body as { email?: unknown } | undefined)?.email,
+            });
+            if (!decision.allowed) {
+              throw APIError.from("BAD_REQUEST", {
+                message: "Email and password sign up is not enabled",
+                code: "EMAIL_PASSWORD_SIGN_UP_DISABLED",
+              });
+            }
+          }),
+        },
+      ],
     },
     rateLimit: buildBetterAuthRateLimitOptions({
       deploymentMode: config.deploymentMode,
