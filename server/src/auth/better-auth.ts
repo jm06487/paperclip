@@ -1,6 +1,7 @@
 import type { Request, RequestHandler } from "express";
 import type { IncomingHttpHeaders } from "node:http";
 import { betterAuth, type Auth } from "better-auth";
+import { APIError, createAuthMiddleware } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { toNodeHandler } from "better-auth/node";
 import type { Db } from "@paperclipai/db";
@@ -12,6 +13,14 @@ import {
 } from "@paperclipai/db";
 import type { Config } from "../config.js";
 import { resolvePaperclipInstanceId } from "../home-paths.js";
+import {
+  INVITE_SIGNUP_TOKEN_HEADER,
+  claimInviteForSignup,
+  completeInviteSignupClaim,
+  inviteSignupClaimContext,
+  readInviteSignupToken,
+  releaseInviteSignupClaim,
+} from "./invite-signup.js";
 import {
   workspaceLoginHandoffPlugin,
   type WorkspaceHandoffExpectedIdentity,
@@ -238,6 +247,17 @@ export function resolveWorkspaceHandoffIdentity(
   };
 }
 
+/**
+ * True only when the sign-up response carries the created user. The invite
+ * claim is released for every other outcome so a failed attempt does not burn
+ * the admin-issued invite.
+ */
+function signUpCreatedUser(returned: unknown): boolean {
+  if (!returned || typeof returned !== "object" || returned instanceof Error) return false;
+  const user = (returned as { user?: { id?: unknown } }).user;
+  return typeof user?.id === "string" && user.id.length > 0;
+}
+
 export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins: string[]): BetterAuthInstance {
   const baseUrl = config.authBaseUrlMode === "explicit" ? config.authPublicBaseUrl : undefined;
   const publicUrl = process.env.PAPERCLIP_PUBLIC_URL?.trim() || baseUrl;
@@ -273,7 +293,40 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
     emailAndPassword: {
       enabled: true,
       requireEmailVerification: false,
-      disableSignUp: config.authDisableSignUp,
+      // Public sign-up is enforced below, not by Better Auth's global switch,
+      // so a valid invite token can still complete an admin-issued invite.
+      disableSignUp: false,
+    },
+    hooks: {
+      before: createAuthMiddleware(async (ctx) => {
+        if (ctx.path !== "/sign-up/email") return;
+        if (!config.authDisableSignUp) return;
+        const token = readInviteSignupToken({ headers: ctx.headers });
+        const decision = await claimInviteForSignup(db, {
+          token,
+          email: (ctx.body as { email?: unknown } | undefined)?.email,
+        });
+        if (!decision.allowed) {
+          throw APIError.from("BAD_REQUEST", {
+            message: "Email and password sign up is not enabled",
+            code: "EMAIL_PASSWORD_SIGN_UP_DISABLED",
+          });
+        }
+        const claimContext = inviteSignupClaimContext.getStore();
+        if (claimContext) claimContext.claimId = decision.claimId;
+      }),
+      after: createAuthMiddleware(async (ctx) => {
+        if (ctx.path !== "/sign-up/email") return;
+        if (!config.authDisableSignUp) return;
+        const claimId = inviteSignupClaimContext.getStore()?.claimId;
+        if (!claimId) return;
+        const token = readInviteSignupToken({ headers: ctx.headers });
+        if (signUpCreatedUser(ctx.context.returned)) {
+          await completeInviteSignupClaim(db, { token, claimId });
+          return;
+        }
+        await releaseInviteSignupClaim(db, { token, claimId });
+      }),
     },
     rateLimit: buildBetterAuthRateLimitOptions({
       deploymentMode: config.deploymentMode,
@@ -353,10 +406,64 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
   };
 }
 
-export function createBetterAuthHandler(auth: BetterAuthHandlerTarget): RequestHandler {
+export type BetterAuthHandlerOptions = {
+  /** Whether the admin-invite-only sign-up control is active. */
+  isInviteSignupEnabled?: () => boolean;
+  /** Release the request's invite reservation when sign-up did not succeed. */
+  releaseFailedSignupClaim?: (input: { token: string; claimId: string }) => Promise<unknown>;
+};
+
+function isInviteSignupRequestUrl(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    return new URL(url, "http://localhost").pathname.replace(/\/+$/, "").endsWith("/sign-up/email");
+  } catch {
+    return false;
+  }
+}
+
+function inviteSignupTokenFromHeaders(headers: Request["headers"]): string {
+  const value = headers[INVITE_SIGNUP_TOKEN_HEADER];
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (typeof raw !== "string") return "";
+  return readInviteSignupToken({
+    headers: new Headers({ [INVITE_SIGNUP_TOKEN_HEADER]: raw }),
+  });
+}
+
+export function createBetterAuthHandler(
+  auth: BetterAuthHandlerTarget,
+  options: BetterAuthHandlerOptions = {},
+): RequestHandler {
   const handler = toNodeHandler(auth);
+  const releaseFailure = async (req: Request, context: { claimId?: string }) => {
+    const release = options.releaseFailedSignupClaim;
+    if (!release || !context.claimId) return;
+    if (!options.isInviteSignupEnabled?.()) return;
+    const token = inviteSignupTokenFromHeaders(req.headers);
+    if (!token) return;
+    await Promise.resolve(release({ token, claimId: context.claimId })).catch(() => undefined);
+  };
   return (req, res, next) => {
-    void Promise.resolve(handler(req, res)).catch(next);
+    const context: { claimId?: string } = {};
+    inviteSignupClaimContext.run(context, () => {
+      // Better Auth's router turns a non-APIError endpoint failure into a 500
+      // Response instead of rejecting, so `hooks.after` is skipped. Check the
+      // response as well as a rejection so any post-claim failure releases the
+      // reservation.
+      void (async () => {
+        try {
+          await handler(req, res);
+        } catch (error) {
+          await releaseFailure(req, context);
+          next(error);
+          return;
+        }
+        if (isInviteSignupRequestUrl(req.url) && res.statusCode >= 400) {
+          await releaseFailure(req, context);
+        }
+      })().catch(() => undefined);
+    });
   };
 }
 

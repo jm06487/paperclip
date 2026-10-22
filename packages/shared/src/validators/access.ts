@@ -14,6 +14,10 @@ export const createCompanyInviteSchema = z.object({
   humanRole: z.enum(HUMAN_COMPANY_MEMBERSHIP_ROLES).optional().nullable(),
   defaultsPayload: z.record(z.string(), z.unknown()).optional().nullable(),
   agentMessage: z.string().max(4000).optional().nullable(),
+  // Optional binding for human invites: when set, the invited email must be
+  // the one that completes sign-up. It is stored as
+  // `defaultsPayload.invitedEmail`, which `claimInviteForSignup` enforces.
+  invitedEmail: z.string().trim().toLowerCase().email().max(320).optional().nullable(),
 });
 
 export type CreateCompanyInvite = z.infer<typeof createCompanyInviteSchema>;

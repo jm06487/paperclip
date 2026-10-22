@@ -378,11 +378,14 @@ export function InviteLandingPage() {
         await authApi.signInEmail({ email: email.trim(), password });
         return;
       }
-      await authApi.signUpEmail({
-        name: name.trim(),
-        email: email.trim(),
-        password,
-      });
+      await authApi.signUpEmail(
+        {
+          name: name.trim(),
+          email: email.trim(),
+          password,
+        },
+        { inviteToken: token },
+      );
     },
     onSuccess: async () => {
       setAuthFeedback(null);

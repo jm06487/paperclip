@@ -3034,11 +3034,22 @@ export function accessRoutes(
     humanRole?: "owner" | "admin" | "operator" | "viewer" | null;
     defaultsPayload?: Record<string, unknown> | null;
     agentMessage?: string | null;
+    invitedEmail?: string | null;
   }) {
     const normalizedAgentMessage =
       typeof input.agentMessage === "string"
         ? input.agentMessage.trim() || null
         : null;
+    const normalizedInvitedEmail =
+      typeof input.invitedEmail === "string"
+        ? input.invitedEmail.trim().toLowerCase() || null
+        : null;
+    const defaultsPayload = normalizedInvitedEmail
+      ? {
+          ...(isPlainObject(input.defaultsPayload) ? input.defaultsPayload : {}),
+          invitedEmail: normalizedInvitedEmail,
+        }
+      : input.defaultsPayload ?? null;
     const effectiveHumanRole =
       input.allowedJoinTypes === "agent"
         ? null
@@ -3057,7 +3068,7 @@ export function accessRoutes(
       inviteType: "company_join" as const,
       allowedJoinTypes: input.allowedJoinTypes,
       defaultsPayload: mergeInviteDefaults(
-        input.defaultsPayload ?? null,
+        defaultsPayload,
         normalizedAgentMessage,
         effectiveHumanRole,
       ),
@@ -3300,7 +3311,8 @@ export function accessRoutes(
           allowedJoinTypes: req.body.allowedJoinTypes,
           humanRole: req.body.humanRole ?? null,
           defaultsPayload: req.body.defaultsPayload ?? null,
-          agentMessage: req.body.agentMessage ?? null
+          agentMessage: req.body.agentMessage ?? null,
+          invitedEmail: req.body.invitedEmail ?? null,
         });
 
       await logActivity(db, {

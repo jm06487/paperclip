@@ -750,6 +750,7 @@ async function startServerWithDatabaseTeardown(
       resolveBetterAuthSession,
       resolveBetterAuthSessionFromHeaders,
     } = await import("./auth/better-auth.js");
+    const { releaseInviteSignupClaim } = await import("./auth/invite-signup.js");
     const derivedTrustedOrigins = deriveAuthTrustedOrigins(config, { listenPort });
     const envTrustedOrigins = (process.env.BETTER_AUTH_TRUSTED_ORIGINS ?? "")
       .split(",")
@@ -769,7 +770,10 @@ async function startServerWithDatabaseTeardown(
       "Authenticated mode auth origin configuration",
     );
     const auth = createBetterAuthInstance(db as any, config, effectiveTrustedOrigins);
-    betterAuthHandler = createBetterAuthHandler(auth);
+    betterAuthHandler = createBetterAuthHandler(auth, {
+      isInviteSignupEnabled: () => config.authDisableSignUp,
+      releaseFailedSignupClaim: (input) => releaseInviteSignupClaim(db as any, input),
+    });
     resolveSession = (req) => resolveBetterAuthSession(auth, req);
     resolveSessionFromHeaders = (headers) => resolveBetterAuthSessionFromHeaders(auth, headers);
     await initializeBoardClaimChallenge(db as any, { deploymentMode: config.deploymentMode });
