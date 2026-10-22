@@ -6,6 +6,9 @@ name: Verify OpenCode runtime image on the MEC-485 base (MEC-437)
 # gate that the platform workflow will run after merge.
 
 on:
+  push:
+    branches:
+      - verify/mec-437-opencode-image
   workflow_dispatch:
 
 permissions:
