@@ -155,10 +155,10 @@ describeEmbeddedPostgres("Better Auth invite-only sign-up", () => {
     expect(accepted.body?.user?.email).toBe(INVITED_EMAIL);
     expect(await rowCounts()).toEqual({ users: 1, accounts: 1, sessions: 1 });
 
-    const [stored] = await db.select().from(invites);
-    expect(stored.id).toBe(invite.id);
+    const stored = (await db.select().from(invites)).find((row) => row.id === invite.id);
+    expect(stored).toBeDefined();
     expect(
-      (stored.defaultsPayload as Record<string, unknown> | null)?.signupConsumedAt,
+      (stored?.defaultsPayload as Record<string, unknown> | null)?.signupConsumedAt,
     ).toBeTruthy();
 
     const reused = await signUp(
