@@ -1,0 +1,87 @@
+name: Verify agent-runtime-base (Go 1.27.3)
+
+on:
+  push:
+    branches: [verify/agent-runtime-go-1.27.3]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build base image (load)
+        run: |
+          docker buildx build \
+            --file docker/agent-runtime/Dockerfile.base \
+            --tag agent-runtime-base:verify \
+            --load \
+            .
+
+      - name: Build shim stage and read embedded Go version
+        run: |
+          docker buildx build \
+            --file docker/agent-runtime/Dockerfile.base \
+            --target shim-build \
+            --tag agent-runtime-shim-build:verify \
+            --load \
+            .
+          docker run --rm agent-runtime-shim-build:verify \
+            go version -m /out/paperclip-agent-shim | tee shim-go-version.txt
+
+      - name: Record runtime metadata
+        run: |
+          docker run --rm --entrypoint /bin/sh agent-runtime-base:verify -c '
+            set -eu
+            . /etc/os-release
+            echo "os=${PRETTY_NAME}"
+            echo "node=$(node --version)"
+            echo "npm=$(npm --version)"
+            echo "uid=$(id -u)"
+            echo "user=$(id -un)"
+            echo "--- openssl packages ---"
+            dpkg-query -W libssl3 openssl
+          ' | tee runtime-metadata.txt
+
+      - name: Install Trivy 0.70.0
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v0.70.0
+          trivy --version | tee trivy-version.txt
+
+      - name: Scan base image (HIGH,CRITICAL)
+        run: |
+          set +e
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --format table \
+            --output trivy-base.txt \
+            agent-runtime-base:verify
+          echo "table_exit=$?"
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --format json \
+            --output trivy-base.json \
+            agent-runtime-base:verify
+          echo "json_exit=$?"
+          set -e
+          echo "--- vulnerability counts ---"
+          jq '[.Results[]?.Vulnerabilities[]?] | group_by(.Severity) | map({severity: .[0].Severity, count: length})' trivy-base.json
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-runtime-base-go-1.27.3-evidence
+          path: |
+            trivy-base.txt
+            trivy-base.json
+            trivy-version.txt
+            runtime-metadata.txt
+            shim-go-version.txt
