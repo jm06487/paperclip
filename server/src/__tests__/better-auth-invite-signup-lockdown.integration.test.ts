@@ -19,6 +19,7 @@
 import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
+import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   authAccounts,
@@ -35,7 +36,10 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { createBetterAuthHandler, createBetterAuthInstance } from "../auth/better-auth.js";
-import { hashInviteSignupToken } from "../auth/invite-signup.js";
+import {
+  hashInviteSignupToken,
+  releaseInviteSignupClaim,
+} from "../auth/invite-signup.js";
 import type { Config } from "../config.js";
 
 const ORIGIN = "http://127.0.0.1:41998";
@@ -160,7 +164,13 @@ describeEmbeddedPostgres("Better Auth invite-only sign-up", () => {
 
     const auth = createBetterAuthInstance(db, testConfig(), [ORIGIN]);
     app = express();
-    app.all("/api/auth/{*authPath}", createBetterAuthHandler(auth));
+    app.all(
+      "/api/auth/{*authPath}",
+      createBetterAuthHandler(auth, {
+        isInviteSignupEnabled: () => true,
+        releaseFailedSignupClaim: (input) => releaseInviteSignupClaim(db, input),
+      }),
+    );
     app.use(express.json());
     app.use((req, _res, next) => {
       (req as any).actor = actor;
@@ -394,5 +404,67 @@ describeEmbeddedPostgres("Better Auth invite-only sign-up", () => {
       .from(companyMemberships)
       .then((rows) => rows.find((row) => row.principalId === userId));
     expect(membership?.status).toBe("active");
+  });
+
+  it("releases a claimed invite after a generic non-APIError sign-up failure", async () => {
+    const token = "pcp_invite_generic_failure_token_0001";
+    const email = "generic-failure@example.com";
+    const invite = await insertInvite({ token, email });
+
+    // Better Auth's before hook reserves the invite, then `linkAccount` raises
+    // a plain database error. Better Auth does not catch that error, so the
+    // router returns a 500 Response and hooks.after never runs. This is the
+    // path that used to leave `signupConsumedAt` set and burn the invite.
+    await db.execute(sql`
+      create or replace function paperclip_test_fail_account_insert()
+      returns trigger language plpgsql as $$
+      begin
+        raise exception 'injected generic post-claim failure';
+      end;
+      $$
+    `);
+    await db.execute(sql`
+      create trigger paperclip_test_fail_account_insert
+      before insert on "account"
+      for each row execute function paperclip_test_fail_account_insert()
+    `);
+
+    try {
+      const failed = await signUp(
+        { email, password: PASSWORD, name: "Flaky" },
+        token,
+      );
+      expect(failed.status).toBe(500);
+    } finally {
+      await db.execute(sql`drop trigger if exists paperclip_test_fail_account_insert on "account"`);
+      await db.execute(sql`drop function if exists paperclip_test_fail_account_insert()`);
+    }
+
+    // The user row may exist without its credential account. Remove it so the
+    // retry below exercises the invite, not the duplicate-email guard.
+    await db.execute(sql`delete from "user" where email = ${email}`);
+
+    const claimCleared = async () => {
+      const stored = (await db.select().from(invites)).find((row) => row.id === invite.id);
+      const defaults = stored?.defaultsPayload as Record<string, unknown> | null;
+      return !defaults?.signupClaimId;
+    };
+    for (let attempt = 0; attempt < 40 && !(await claimCleared()); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(await claimCleared()).toBe(true);
+
+    const stored = (await db.select().from(invites)).find((row) => row.id === invite.id);
+    const defaults = stored?.defaultsPayload as Record<string, unknown> | null;
+    expect(defaults?.signupConsumedAt).toBeUndefined();
+
+    const accepted = await signUp({ email, password: PASSWORD, name: "Recovered" }, token);
+    expect(accepted.status).toBe(200);
+    expect(accepted.body?.user?.email).toBe(email);
+
+    const completed = (await db.select().from(invites)).find((row) => row.id === invite.id);
+    const completedDefaults = completed?.defaultsPayload as Record<string, unknown> | null;
+    expect(typeof completedDefaults?.signupConsumedAt).toBe("string");
+    expect(completedDefaults?.signupClaimId).toBeUndefined();
   });
 });
