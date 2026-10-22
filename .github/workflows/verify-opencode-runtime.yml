@@ -1,0 +1,157 @@
+name: Verify OpenCode runtime image on the MEC-485 base (MEC-437)
+
+# Read-only verification in the public fork. No Harbor credential, no push, no
+# deploy. It rebuilds agent-runtime-base from the pinned verified source, builds
+# the MEC-200 OpenCode runtime image on top, and runs the same fail-closed Trivy
+# gate that the platform workflow will run after merge.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TRIVY_IMAGE: aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e
+
+jobs:
+  verify:
+    name: Build base, build runtime, scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out the pinned source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Record the source head
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git rev-parse HEAD | tee evidence/source-sha.txt
+          git hash-object docker/agent-runtime/Dockerfile.base | tee evidence/dockerfile-base-blob.txt
+          git hash-object verify/opencode/Dockerfile | tee evidence/opencode-dockerfile-blob.txt
+
+      - name: Build agent-runtime-base from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull=false --no-cache \
+            --file docker/agent-runtime/Dockerfile.base \
+            --tag agent-runtime-base:verify \
+            . 2>&1 | tee evidence/base-build.log
+
+      - name: Build the OpenCode runtime image on the rebuilt base
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull=false --no-cache \
+            --build-arg BASE_IMAGE=agent-runtime-base:verify \
+            --file verify/opencode/Dockerfile \
+            --tag agent-runtime-opencode:verify \
+            verify/opencode 2>&1 | tee evidence/runtime-build.log
+
+      - name: Verify runtime identity, npm removal, CLI and package floors
+        shell: bash
+        run: |
+          set -euo pipefail
+          image=agent-runtime-opencode:verify
+          test "$(docker image inspect "$image" --format '{{.Config.User}}')" = "1000:1000"
+          docker run --rm --network none --read-only --user 1000:1000 \
+            --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,size=64m \
+            --entrypoint /bin/sh "$image" -ec '
+              test "$(id -u)" = "1000"
+              if command -v npm >/dev/null 2>&1; then echo "npm is present" >&2; exit 1; fi
+              if command -v npx >/dev/null 2>&1; then echo "npx is present" >&2; exit 1; fi
+              command -v node >/dev/null 2>&1
+              opencode --version | grep -F "1.19.3" >/dev/null
+            '
+          {
+            echo "node=$(docker run --rm --entrypoint node "$image" -v)"
+            echo "opencode=$(docker run --rm --entrypoint opencode "$image" --version)"
+            docker run --rm --entrypoint /bin/sh "$image" -ec 'dpkg-query -W -f="${Package}=${Version}\n" libssl3 openssl'
+          } | tee evidence/runtime-metadata.txt
+
+      - name: Trivy vulnerability scan, fail-closed, no ignore file
+        id: scan_vuln
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p scan/cache scan/out
+          chmod 0777 scan scan/cache scan/out
+          docker save agent-runtime-opencode:verify -o scan/image.tar
+          docker run --rm --user 0:0 \
+            --mount "type=bind,src=$PWD/scan/cache,dst=/cache" \
+            --entrypoint trivy "$TRIVY_IMAGE" \
+            --cache-dir /cache image --download-db-only
+          docker run --rm --user 0:0 \
+            --mount "type=bind,src=$PWD/scan/cache,dst=/cache" \
+            --entrypoint trivy "$TRIVY_IMAGE" \
+            --cache-dir /cache --version | tee scan/out/trivy-version.txt
+          docker run --rm --user 0:0 \
+            --mount "type=bind,src=$PWD/scan,dst=/scan" \
+            --entrypoint trivy "$TRIVY_IMAGE" \
+            --cache-dir /scan/cache image --input /scan/image.tar \
+            --scanners vuln --severity HIGH,CRITICAL --exit-code 1 \
+            --format json --output /scan/out/trivy-vuln.json
+
+      - name: Trivy secret scan
+        if: ${{ always() && steps.scan_vuln.outcome != 'skipped' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p scan/out
+          docker run --rm --user 0:0 \
+            --mount "type=bind,src=$PWD/scan,dst=/scan" \
+            --entrypoint trivy "$TRIVY_IMAGE" \
+            --cache-dir /scan/cache image --input /scan/image.tar \
+            --scanners secret --exit-code 1 \
+            --format json --output /scan/out/trivy-secret.json
+
+      - name: Summarize results
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p scan/out
+          python3 - <<'PY' | tee scan/out/summary.txt
+          import collections
+          import json
+          import pathlib
+
+          path = pathlib.Path("scan/out/trivy-vuln.json")
+          if not path.exists():
+              print("trivy_vuln=missing")
+              raise SystemExit(1)
+          report = json.loads(path.read_text(encoding="utf-8"))
+          findings = [f for r in report.get("Results") or [] for f in r.get("Vulnerabilities") or []]
+          counts = collections.Counter(f.get("Severity") for f in findings)
+          print("trivy_high=" + str(counts.get("HIGH", 0)))
+          print("trivy_critical=" + str(counts.get("CRITICAL", 0)))
+          print("trivy_counts=" + json.dumps(dict(sorted(counts.items()))))
+          for f in findings:
+              print(f"{f.get('Severity')} {f.get('VulnerabilityID')} {f.get('PkgName')} {f.get('InstalledVersion')} -> {f.get('FixedVersion')}")
+          if counts.get("HIGH", 0) or counts.get("CRITICAL", 0):
+              raise SystemExit("expected 0 HIGH and 0 CRITICAL")
+          secret_path = pathlib.Path("scan/out/trivy-secret.json")
+          secrets = 0
+          if secret_path.exists():
+              sreport = json.loads(secret_path.read_text(encoding="utf-8"))
+              secrets = sum(len(r.get("Secrets") or []) for r in sreport.get("Results") or [])
+          print("trivy_secret_findings=" + str(secrets))
+          if secrets:
+              raise SystemExit("secret findings present")
+          PY
+
+      - name: Upload evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mec-437-opencode-verify
+          path: |
+            evidence/
+            scan/out/
+          if-no-files-found: warn
+          retention-days: 14

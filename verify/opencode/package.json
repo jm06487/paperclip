@@ -1,0 +1,9 @@
+{
+  "name": "paperclip-agent-runtime-opencode",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pinned OpenCode CLI dependency for the Paperclip OpenCode runtime image",
+  "dependencies": {
+    "opencode-ai": "1.19.3"
+  }
+}
