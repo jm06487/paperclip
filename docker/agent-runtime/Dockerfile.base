@@ -3,7 +3,7 @@ ARG NODE_VERSION=24
 ARG TARGETARCH
 
 # ---------- Stage 1: build agent-shim ----------
-FROM golang:1.25-bookworm AS shim-build
+FROM golang:1.27.3-bookworm AS shim-build
 ARG TARGETARCH
 WORKDIR /src
 COPY tools/agent-shim/ ./
@@ -19,6 +19,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} \
 # Add it when git workspace population lands.
 FROM ubuntu:22.04 AS base
 ARG NODE_VERSION
+ARG DEBIAN_FRONTEND=noninteractive
 # ripgrep (rg): required on PATH so OpenCode's skill tooling uses the system
 # binary instead of trying to download a pinned build from github.com at run
 # time. A sandbox with locked-down egress makes that download hang ~127s then
@@ -29,11 +30,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git tini gnupg ripgrep \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends nodejs libssl3 openssl \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 1000 paperclip \
     && useradd -u 1000 -g 1000 -d /home/paperclip -m -s /bin/bash paperclip
+
+RUN set -eux; \
+    libssl3_version="$(dpkg-query -W -f='${Version}' libssl3)"; \
+    openssl_version="$(dpkg-query -W -f='${Version}' openssl)"; \
+    echo "libssl3=${libssl3_version} openssl=${openssl_version}"; \
+    dpkg --compare-versions "$libssl3_version" ge '3.0.2-0ubuntu1.30'; \
+    dpkg --compare-versions "$openssl_version" ge '3.0.2-0ubuntu1.30'
 
 COPY --from=shim-build   /out/paperclip-agent-shim                          /usr/local/bin/paperclip-agent-shim
 

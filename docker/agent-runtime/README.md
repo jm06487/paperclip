@@ -15,8 +15,9 @@ Container images for running coding-agent harnesses in sandboxed environments (f
 ## Base Image Contents
 
 **OS & Runtime:**
-- Ubuntu 22.04
-- Node.js 24 (via NodeSource APT repo)
+- Ubuntu 22.04, with package security upgrades applied at build time
+  (`libssl3` and `openssl` must be at least `3.0.2-0ubuntu1.30`; the build fails otherwise)
+- Node.js 24 and npm (via NodeSource APT repo)
 - git
 - tini (PID-1 init, ensures signal propagation)
 - Non-root user `paperclip` (uid/gid 1000)
@@ -30,7 +31,7 @@ exec path sources `nvm`. For the full exec-path contract, see
 `packages/plugins/sandbox-providers/SANDBOX-REQUIREMENTS.md`.
 
 **Paperclip Binaries:**
-- `/usr/local/bin/paperclip-agent-shim`: Go binary compiled from `tools/agent-shim/`. Reads `/run/paperclip/runtime-command.json` and `syscall.Exec`s the harness CLI.
+- `/usr/local/bin/paperclip-agent-shim`: Go binary compiled from `tools/agent-shim/` with Go 1.27.3. Reads `/run/paperclip/runtime-command.json` and `syscall.Exec`s the harness CLI.
 
 **Defaults:**
 - `USER`: 1000:1000 (paperclip, non-root)
