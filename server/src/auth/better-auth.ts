@@ -16,6 +16,7 @@ import { resolvePaperclipInstanceId } from "../home-paths.js";
 import {
   claimInviteForSignup,
   readInviteSignupToken,
+  releaseInviteSignupClaim,
 } from "./invite-signup.js";
 import {
   workspaceLoginHandoffPlugin,
@@ -243,6 +244,17 @@ export function resolveWorkspaceHandoffIdentity(
   };
 }
 
+/**
+ * True only when the sign-up response carries the created user. The invite
+ * claim is released for every other outcome so a failed attempt does not burn
+ * the admin-issued invite.
+ */
+function signUpCreatedUser(returned: unknown): boolean {
+  if (!returned || typeof returned !== "object" || returned instanceof Error) return false;
+  const user = (returned as { user?: { id?: unknown } }).user;
+  return typeof user?.id === "string" && user.id.length > 0;
+}
+
 export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins: string[]): BetterAuthInstance {
   const baseUrl = config.authBaseUrlMode === "explicit" ? config.authPublicBaseUrl : undefined;
   const publicUrl = process.env.PAPERCLIP_PUBLIC_URL?.trim() || baseUrl;
@@ -286,8 +298,9 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
       before: createAuthMiddleware(async (ctx) => {
         if (ctx.path !== "/sign-up/email") return;
         if (!config.authDisableSignUp) return;
+        const token = readInviteSignupToken({ headers: ctx.headers });
         const decision = await claimInviteForSignup(db, {
-          token: readInviteSignupToken({ headers: ctx.headers, body: ctx.body }),
+          token,
           email: (ctx.body as { email?: unknown } | undefined)?.email,
         });
         if (!decision.allowed) {
@@ -296,6 +309,14 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
             code: "EMAIL_PASSWORD_SIGN_UP_DISABLED",
           });
         }
+      }),
+      after: createAuthMiddleware(async (ctx) => {
+        if (ctx.path !== "/sign-up/email") return;
+        if (!config.authDisableSignUp) return;
+        if (signUpCreatedUser(ctx.context.returned)) return;
+        await releaseInviteSignupClaim(db, {
+          token: readInviteSignupToken({ headers: ctx.headers }),
+        });
       }),
     },
     rateLimit: buildBetterAuthRateLimitOptions({

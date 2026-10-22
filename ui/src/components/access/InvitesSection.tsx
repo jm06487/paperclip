@@ -51,6 +51,7 @@ export function InvitesSection() {
   const { pushToast } = useToast();
   const queryClient = useQueryClient();
   const [humanRole, setHumanRole] = useState<"owner" | "admin" | "operator" | "viewer">("operator");
+  const [invitedEmail, setInvitedEmail] = useState("");
   const [latestInviteUrl, setLatestInviteUrl] = useState<string | null>(null);
   const [latestInviteCopied, setLatestInviteCopied] = useState(false);
   const latestInviteInputRef = useRef<HTMLInputElement | null>(null);
@@ -108,12 +109,15 @@ export function InvitesSection() {
   );
 
   const createInviteMutation = useMutation({
-    mutationFn: () =>
-      accessApi.createCompanyInvite(selectedCompanyId!, {
+    mutationFn: () => {
+      const normalizedEmail = invitedEmail.trim().toLowerCase();
+      return accessApi.createCompanyInvite(selectedCompanyId!, {
         allowedJoinTypes: "human",
         humanRole,
         agentMessage: null,
-      }),
+        ...(normalizedEmail ? { invitedEmail: normalizedEmail } : {}),
+      });
+    },
     onSuccess: async (invite) => {
       setLatestInviteUrl(invite.inviteUrl);
       setLatestInviteCopied(false);
@@ -182,6 +186,20 @@ export function InvitesSection() {
             Generate a human invite link and choose the default access it should request.
           </p>
         </div>
+
+        <label className="block max-w-md space-y-1">
+          <span className="text-sm font-medium">Invitee email (optional)</span>
+          <input
+            type="email"
+            value={invitedEmail}
+            onChange={(event) => setInvitedEmail(event.currentTarget.value)}
+            placeholder="person@example.com"
+            className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground outline-none transition-colors focus:border-ring"
+          />
+          <span className="block text-xs text-muted-foreground">
+            When set, only this email can complete the invite. Leave blank to let the single-use link authorize the recipient.
+          </span>
+        </label>
 
         <fieldset className="space-y-3">
           <legend className="text-sm font-medium">Choose a role</legend>

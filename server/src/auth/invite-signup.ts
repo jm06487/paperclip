@@ -24,20 +24,10 @@ export function hashInviteSignupToken(token: string): string {
 
 export function readInviteSignupToken(input: {
   headers?: Headers | null;
-  body?: unknown;
 }): string {
   const fromHeader = input.headers?.get(INVITE_SIGNUP_TOKEN_HEADER)?.trim();
-  if (fromHeader) {
-    return fromHeader.length <= MAX_INVITE_TOKEN_LENGTH ? fromHeader : "";
-  }
-  if (input.body && typeof input.body === "object") {
-    const candidate = (input.body as Record<string, unknown>).inviteToken;
-    if (typeof candidate === "string") {
-      const trimmed = candidate.trim();
-      return trimmed.length <= MAX_INVITE_TOKEN_LENGTH ? trimmed : "";
-    }
-  }
-  return "";
+  if (!fromHeader) return "";
+  return fromHeader.length <= MAX_INVITE_TOKEN_LENGTH ? fromHeader : "";
 }
 
 function invitedEmailFromDefaults(defaultsPayload: unknown): string | null {
@@ -129,4 +119,36 @@ export async function claimInviteForSignup(
 
   if (!claimed) return { allowed: false, reason: "invalid" };
   return { allowed: true, inviteId: claimed.id, companyId: claimed.companyId };
+}
+
+/**
+ * Release a sign-up claim when Better Auth did not create the account.
+ *
+ * The `before` hook claims the invite so two concurrent sign-ups cannot both
+ * pass, but a later failure (duplicate email, weak password, write error) must
+ * not burn the admin-issued invite. The `after` hook calls this only for an
+ * unsuccessful response; a claim is only ever held between those two hooks.
+ */
+export async function releaseInviteSignupClaim(
+  db: Db,
+  input: { token: string; now?: Date },
+): Promise<boolean> {
+  const token = input.token.trim();
+  if (!token) return false;
+  const now = input.now ?? new Date();
+  const released = await db
+    .update(invites)
+    .set({
+      defaultsPayload: sql`coalesce(${invites.defaultsPayload}, '{}'::jsonb) - ${SIGNUP_CONSUMED_AT_KEY}`,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(invites.tokenHash, hashInviteSignupToken(token)),
+        isNull(invites.acceptedAt),
+        isNull(invites.revokedAt),
+      ),
+    )
+    .returning({ id: invites.id });
+  return released.length > 0;
 }
