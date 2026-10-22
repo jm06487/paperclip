@@ -87,6 +87,15 @@ export async function claimInviteForSignup(
   if (invite.expiresAt.getTime() <= now.getTime()) {
     return { allowed: false, reason: "invalid" };
   }
+  if (invite.inviteType !== "bootstrap_ceo" && invite.inviteType !== "company_join") {
+    return { allowed: false, reason: "invalid" };
+  }
+  if (invite.inviteType === "company_join" && !invite.companyId) {
+    return { allowed: false, reason: "invalid" };
+  }
+  if (invite.allowedJoinTypes !== "human" && invite.allowedJoinTypes !== "both") {
+    return { allowed: false, reason: "invalid" };
+  }
   const defaults = invite.defaultsPayload as Record<string, unknown> | null;
   if (defaults && typeof defaults === "object" && defaults[SIGNUP_CONSUMED_AT_KEY]) {
     return { allowed: false, reason: "invalid" };
