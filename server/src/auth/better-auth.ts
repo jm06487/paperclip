@@ -283,24 +283,20 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
       disableSignUp: false,
     },
     hooks: {
-      before: [
-        {
-          matcher: (context) => context.path === "/sign-up/email",
-          handler: createAuthMiddleware(async (ctx) => {
-            if (!config.authDisableSignUp) return;
-            const decision = await claimInviteForSignup(db, {
-              token: readInviteSignupToken({ headers: ctx.headers, body: ctx.body }),
-              email: (ctx.body as { email?: unknown } | undefined)?.email,
-            });
-            if (!decision.allowed) {
-              throw APIError.from("BAD_REQUEST", {
-                message: "Email and password sign up is not enabled",
-                code: "EMAIL_PASSWORD_SIGN_UP_DISABLED",
-              });
-            }
-          }),
-        },
-      ],
+      before: createAuthMiddleware(async (ctx) => {
+        if (ctx.path !== "/sign-up/email") return;
+        if (!config.authDisableSignUp) return;
+        const decision = await claimInviteForSignup(db, {
+          token: readInviteSignupToken({ headers: ctx.headers, body: ctx.body }),
+          email: (ctx.body as { email?: unknown } | undefined)?.email,
+        });
+        if (!decision.allowed) {
+          throw APIError.from("BAD_REQUEST", {
+            message: "Email and password sign up is not enabled",
+            code: "EMAIL_PASSWORD_SIGN_UP_DISABLED",
+          });
+        }
+      }),
     },
     rateLimit: buildBetterAuthRateLimitOptions({
       deploymentMode: config.deploymentMode,
